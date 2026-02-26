@@ -1,534 +1,450 @@
+// _worker.js
+
+// Docker镜像仓库主机地址
+let hub_host = 'registry-1.docker.io';
+// Docker认证服务器地址
+const auth_url = 'https://auth.docker.io';
+// 自定义的工作服务器地址
+let workers_url = 'https://xxx/';
+
+let 屏蔽爬虫UA = ['netcraft'];
+
+// 根据主机名选择对应的上游地址
+function routeByHosts(host) {
+	// 定义路由表
+	const routes = {
+		// 生产环境
+		"quay": "quay.io",
+		"gcr": "gcr.io",
+		"k8s-gcr": "k8s.gcr.io",
+		"k8s": "registry.k8s.io",
+		"ghcr": "ghcr.io",
+		"cloudsmith": "docker.cloudsmith.io",
+		"nvcr": "nvcr.io",
+		
+		// 测试环境
+		"test": "registry-1.docker.io",
+	};
+
+	if (host in routes) return [ routes[host], false ];
+	else return [ hub_host, true ];
+}
+
+/** @type {RequestInit} */
+const PREFLIGHT_INIT = {
+	// 预检请求配置
+	headers: new Headers({
+		'access-control-allow-origin': '*', // 允许所有来源
+		'access-control-allow-methods': 'GET,POST,PUT,PATCH,TRACE,DELETE,HEAD,OPTIONS', // 允许的HTTP方法
+		'access-control-max-age': '1728000', // 预检请求的缓存时间
+	}),
+}
+
 /**
- * Cloudflare Worker HTTP/HTTPS Proxy
- * 结合 Web UI 和标准 HTTP 代理协议
- * 支持多种调用方式：Web 界面、查询参数、路径方式、标准代理
+ * 构造响应
+ * @param {any} body 响应体
+ * @param {number} status 响应状态码
+ * @param {Object<string, string>} headers 响应头
  */
+function makeRes(body, status = 200, headers = {}) {
+	headers['access-control-allow-origin'] = '*' // 允许所有来源
+	return new Response(body, { status, headers }) // 返回新构造的响应
+}
+
+/**
+ * 构造新的URL对象
+ * @param {string} urlStr URL字符串
+ */
+function newUrl(urlStr) {
+	try {
+		return new URL(urlStr) // 尝试构造新的URL对象
+	} catch (err) {
+		return null // 构造失败返回null
+	}
+}
+
+function isUUID(uuid) {
+	// 定义一个正则表达式来匹配 UUID 格式
+	const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[4][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+	
+	// 使用正则表达式测试 UUID 字符串
+	return uuidRegex.test(uuid);
+}
+
+async function nginx() {
+	const text = `
+	<!DOCTYPE html>
+	<html>
+	<head>
+	<title>Welcome to nginx!</title>
+	<style>
+		body {
+			width: 35em;
+			margin: 0 auto;
+			font-family: Tahoma, Verdana, Arial, sans-serif;
+		}
+	</style>
+	</head>
+	<body>
+	<h1>Welcome to nginx!</h1>
+	<p>If you see this page, the nginx web server is successfully installed and
+	working. Further configuration is required.</p>
+	
+	<p>For online documentation and support please refer to
+	<a href="http://nginx.org/">nginx.org</a>.<br/>
+	Commercial support is available at
+	<a href="http://nginx.com/">nginx.com</a>.</p>
+	
+	<p><em>Thank you for using nginx.</em></p>
+	</body>
+	</html>
+	`
+	return text;
+}
+
+async function searchInterface() {
+	const text = `
+	<!DOCTYPE html>
+	<html>
+	<head>
+		<title>Docker Hub Search</title>
+		<style>
+		body {
+			font-family: Arial, sans-serif;
+			display: flex;
+			flex-direction: column;
+			align-items: center;
+			justify-content: center;
+			height: 100vh;
+			margin: 0;
+			background: linear-gradient(to right, rgb(28, 143, 237), rgb(29, 99, 237));
+		}
+		.logo {
+			margin-bottom: 20px;
+		}
+		.search-container {
+			display: flex;
+			align-items: center;
+		}
+		#search-input {
+			padding: 10px;
+			font-size: 16px;
+			border: 1px solid #ddd;
+			border-radius: 4px;
+			width: 300px;
+			margin-right: 10px;
+		}
+		#search-button {
+			padding: 10px;
+			background-color: rgba(255, 255, 255, 0.2); /* 设置白色，透明度为10% */
+			border: none;
+			border-radius: 4px;
+			cursor: pointer;
+			width: 44px;
+			height: 44px;
+			display: flex;
+			align-items: center;
+			justify-content: center;
+		}			
+		#search-button svg {
+			width: 24px;
+			height: 24px;
+		}
+		</style>
+	</head>
+	<body>
+		<div class="logo">
+		<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 18" fill="#ffffff" width="100" height="75">
+			<path d="M23.763 6.886c-.065-.053-.673-.512-1.954-.512-.32 0-.659.03-1.01.087-.248-1.703-1.651-2.533-1.716-2.57l-.345-.2-.227.328a4.596 4.596 0 0 0-.611 1.433c-.23.972-.09 1.884.403 2.666-.596.331-1.546.418-1.744.42H.752a.753.753 0 0 0-.75.749c-.007 1.456.233 2.864.692 4.07.545 1.43 1.355 2.483 2.409 3.13 1.181.725 3.104 1.14 5.276 1.14 1.016 0 2.03-.092 2.93-.266 1.417-.273 2.705-.742 3.826-1.391a10.497 10.497 0 0 0 2.61-2.14c1.252-1.42 1.998-3.005 2.553-4.408.075.003.148.005.221.005 1.371 0 2.215-.55 2.68-1.01.505-.5.685-.998.704-1.053L24 7.076l-.237-.19Z"></path>
+			<path d="M2.216 8.075h2.119a.186.186 0 0 0 .185-.186V6a.186.186 0 0 0-.185-.186H2.216A.186.186 0 0 0 2.031 6v1.89c0 .103.083.186.185.186Zm2.92 0h2.118a.185.185 0 0 0 .185-.186V6a.185.185 0 0 0-.185-.186H5.136A.185.185 0 0 0 4.95 6v1.89c0 .103.083.186.186.186Zm2.964 0h2.118a.186.186 0 0 0 .185-.186V6a.186.186 0 0 0-.185-.186H8.1A.185.185 0 0 0 7.914 6v1.89c0 .103.083.186.186.186Zm2.928 0h2.119a.185.185 0 0 0 .185-.186V6a.185.185 0 0 0-.185-.186h-2.119a.186.186 0 0 0-.185.186v1.89c0 .103.083.186.185.186Zm-5.892-2.72h2.118a.185.185 0 0 0 .185-.186V3.28a.186.186 0 0 0-.185-.186H5.136a.186.186 0 0 0-.186.186v1.89c0 .103.083.186.186.186Zm2.964 0h2.118a.186.186 0 0 0 .185-.186V3.28a.186.186 0 0 0-.185-.186H8.1a.186.186 0 0 0-.186.186v1.89c0 .103.083.186.186.186Zm2.928 0h2.119a.185.185 0 0 0 .185-.186V3.28a.186.186 0 0 0-.185-.186h-2.119a.186.186 0 0 0-.185.186v1.89c0 .103.083.186.185.186Zm0-2.72h2.119a.186.186 0 0 0 .185-.186V.56a.185.185 0 0 0-.185-.186h-2.119a.186.186 0 0 0-.185.186v1.89c0 .103.083.186.185.186Zm2.955 5.44h2.118a.185.185 0 0 0 .186-.186V6a.185.185 0 0 0-.186-.186h-2.118a.185.185 0 0 0-.185.186v1.89c0 .103.083.186.185.186Z"></path>
+		</svg>
+		</div>
+		<div class="search-container">
+		<input type="text" id="search-input" placeholder="Search Docker Hub">
+		<button id="search-button">
+			<svg focusable="false" aria-hidden="true" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+			<path d="M21 21L16.65 16.65M19 11C19 15.4183 15.4183 19 11 19C6.58172 19 3 15.4183 3 11C3 6.58172 6.58172 3 11 3C15.4183 3 19 6.58172 19 11Z" stroke="white" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
+			</svg>
+		</button>
+		</div>
+		<script>
+		function performSearch() {
+			const query = document.getElementById('search-input').value;
+			if (query) {
+			window.location.href = '/search?q=' + encodeURIComponent(query);
+			}
+		}
+	
+		document.getElementById('search-button').addEventListener('click', performSearch);
+		document.getElementById('search-input').addEventListener('keypress', function(event) {
+			if (event.key === 'Enter') {
+			performSearch();
+			}
+		});
+		</script>
+	</body>
+	</html>
+	`;
+	return text;
+}
 
 export default {
-  async fetch(request) {
-    const url = new URL(request.url);
+	async fetch(request, env, ctx) {
+		const getReqHeader = (key) => request.headers.get(key); // 获取请求头
 
-    // CORS 预检
-    if (request.method === 'OPTIONS') {
-      return new Response(null, {
-        headers: corsHeaders()
-      });
-    }
+		let url = new URL(request.url); // 解析请求URL
+		const userAgentHeader = request.headers.get('User-Agent');
+		const userAgent = userAgentHeader ? userAgentHeader.toLowerCase() : "null";
+		if (env.UA) 屏蔽爬虫UA = 屏蔽爬虫UA.concat(await ADD(env.UA));
+		workers_url = `https://${url.hostname}`;
+		const pathname = url.pathname;
 
-    // HTTP CONNECT 方法 - HTTPS 隧道代理
-    if (request.method === 'CONNECT') {
-      return handleConnect(request);
-    }
+		// 获取请求参数中的 ns
+		const ns = url.searchParams.get('ns'); 
+		const hostname = url.searchParams.get('hubhost') || url.hostname;
+		const hostTop = hostname.split('.')[0]; // 获取主机名的第一部分
 
-    // 根路径 - 返回 Web UI
-    if (url.pathname === '/' || url.pathname === '') {
-      return new Response(getRootHtml(), {
-        headers: {
-          'Content-Type': 'text/html; charset=utf-8',
-          ...corsHeaders()
-        }
-      });
-    }
+		let checkHost; // 在这里定义 checkHost 变量
+		// 如果存在 ns 参数，优先使用它来确定 hub_host
+		if (ns) {
+			if (ns === 'docker.io') {
+				hub_host = 'registry-1.docker.io'; // 设置上游地址为 registry-1.docker.io
+			} else {
+				hub_host = ns; // 直接使用 ns 作为 hub_host
+			}
+		} else {
+			checkHost = routeByHosts(hostTop);
+			hub_host = checkHost[0]; // 获取上游地址
+		}
 
-    // 代理请求处理
-    return handleProxyRequest(request, url);
-  }
+		const fakePage = checkHost ? checkHost[1] : false; // 确保 fakePage 不为 undefined
+		console.log(`域名头部: ${hostTop}\n反代地址: ${hub_host}\n伪装首页: ${fakePage}`);
+		const isUuid = isUUID(pathname.split('/')[1].split('/')[0]);
+
+		if (屏蔽爬虫UA.some(fxxk => userAgent.includes(fxxk)) && 屏蔽爬虫UA.length > 0) {
+			// 首页改成一个nginx伪装页
+			return new Response(await nginx(), {
+				headers: {
+					'Content-Type': 'text/html; charset=UTF-8',
+				},
+			});
+		}
+
+		const conditions = [
+			isUuid,
+			pathname.includes('/_'),
+			pathname.includes('/r/'),
+			pathname.includes('/v2/repositories'),
+			pathname.includes('/v2/user'),
+			pathname.includes('/v2/orgs'),
+			pathname.includes('/v2/_catalog'),
+			pathname.includes('/v2/categories'),
+			pathname.includes('/v2/feature-flags'),
+			pathname.includes('search'),
+			pathname.includes('source'),
+			pathname == '/',
+			pathname == '/favicon.ico',
+			pathname == '/auth/profile',
+		];
+
+		if (conditions.some(condition => condition) && (fakePage === true || hostTop == 'docker')) {
+			if (env.URL302) {
+				return Response.redirect(env.URL302, 302);
+			} else if (env.URL) {
+				if (env.URL.toLowerCase() == 'nginx') {
+					//首页改成一个nginx伪装页
+					return new Response(await nginx(), {
+						headers: {
+							'Content-Type': 'text/html; charset=UTF-8',
+						},
+					});
+				} else return fetch(new Request(env.URL, request));
+			} else if (url.pathname == '/'){
+				return new Response(await searchInterface(), {
+					headers: {
+					  'Content-Type': 'text/html; charset=UTF-8',
+					},
+				});
+			}
+			
+			const newUrl = new URL("https://registry.hub.docker.com" + pathname + url.search);
+
+			// 复制原始请求的标头
+			const headers = new Headers(request.headers);
+
+			// 确保 Host 头部被替换为 hub.docker.com
+			headers.set('Host', 'registry.hub.docker.com');
+
+			const newRequest = new Request(newUrl, {
+					method: request.method,
+					headers: headers,
+					body: request.method !== 'GET' && request.method !== 'HEAD' ? await request.blob() : null,
+					redirect: 'follow'
+			});
+
+			return fetch(newRequest);
+		}
+
+		// 修改包含 %2F 和 %3A 的请求
+		if (!/%2F/.test(url.search) && /%3A/.test(url.toString())) {
+			let modifiedUrl = url.toString().replace(/%3A(?=.*?&)/, '%3Alibrary%2F');
+			url = new URL(modifiedUrl);
+			console.log(`handle_url: ${url}`);
+		}
+
+		// 处理token请求
+		if (url.pathname.includes('/token')) {
+			let token_parameter = {
+				headers: {
+					'Host': 'auth.docker.io',
+					'User-Agent': getReqHeader("User-Agent"),
+					'Accept': getReqHeader("Accept"),
+					'Accept-Language': getReqHeader("Accept-Language"),
+					'Accept-Encoding': getReqHeader("Accept-Encoding"),
+					'Connection': 'keep-alive',
+					'Cache-Control': 'max-age=0'
+				}
+			};
+			let token_url = auth_url + url.pathname + url.search;
+			return fetch(new Request(token_url, request), token_parameter);
+		}
+
+		// 修改 /v2/ 请求路径
+		if ( hub_host == 'registry-1.docker.io' && /^\/v2\/[^/]+\/[^/]+\/[^/]+$/.test(url.pathname) && !/^\/v2\/library/.test(url.pathname)) {
+			//url.pathname = url.pathname.replace(/\/v2\//, '/v2/library/');
+			url.pathname = '/v2/library/' + url.pathname.split('/v2/')[1];
+			console.log(`modified_url: ${url.pathname}`);
+		}
+
+		// 更改请求的主机名
+		url.hostname = hub_host;
+
+		// 构造请求参数
+		let parameter = {
+			headers: {
+				'Host': hub_host,
+				'User-Agent': getReqHeader("User-Agent"),
+				'Accept': getReqHeader("Accept"),
+				'Accept-Language': getReqHeader("Accept-Language"),
+				'Accept-Encoding': getReqHeader("Accept-Encoding"),
+				'Connection': 'keep-alive',
+				'Cache-Control': 'max-age=0'
+			},
+			cacheTtl: 3600 // 缓存时间
+		};
+
+		// 添加Authorization头
+		if (request.headers.has("Authorization")) {
+			parameter.headers.Authorization = getReqHeader("Authorization");
+		}
+
+		// 发起请求并处理响应
+		let original_response = await fetch(new Request(url, request), parameter);
+		let original_response_clone = original_response.clone();
+		let original_text = original_response_clone.body;
+		let response_headers = original_response.headers;
+		let new_response_headers = new Headers(response_headers);
+		let status = original_response.status;
+
+		// 修改 Www-Authenticate 头
+		if (new_response_headers.get("Www-Authenticate")) {
+			let auth = new_response_headers.get("Www-Authenticate");
+			let re = new RegExp(auth_url, 'g');
+			new_response_headers.set("Www-Authenticate", response_headers.get("Www-Authenticate").replace(re, workers_url));
+		}
+
+		// 处理重定向
+		if (new_response_headers.get("Location")) {
+			return httpHandler(request, new_response_headers.get("Location"));
+		}
+
+		// 返回修改后的响应
+		let response = new Response(original_text, {
+			status,
+			headers: new_response_headers
+		});
+		return response;
+	}
 };
 
 /**
- * 处理 CONNECT 方法 (HTTPS 隧道)
+ * 处理HTTP请求
+ * @param {Request} req 请求对象
+ * @param {string} pathname 请求路径
  */
-function handleConnect(request) {
-  return new Response(
-    'CONNECT method not supported. Use HTTP proxy mode instead.',
-    {
-      status: 501,
-      statusText: 'Not Implemented',
-      headers: {
-        'Content-Type': 'text/plain',
-        ...corsHeaders()
-      }
-    }
-  );
+function httpHandler(req, pathname) {
+	const reqHdrRaw = req.headers;
+
+	// 处理预检请求
+	if (req.method === 'OPTIONS' &&
+		reqHdrRaw.has('access-control-request-headers')
+	) {
+		return new Response(null, PREFLIGHT_INIT);
+	}
+
+	let rawLen = '';
+
+	const reqHdrNew = new Headers(reqHdrRaw);
+
+	const refer = reqHdrNew.get('referer');
+
+	let urlStr = pathname;
+
+	const urlObj = newUrl(urlStr);
+
+	/** @type {RequestInit} */
+	const reqInit = {
+		method: req.method,
+		headers: reqHdrNew,
+		redirect: 'follow',
+		body: req.body
+	};
+	return proxy(urlObj, reqInit, rawLen);
 }
 
 /**
- * 处理代理请求
+ * 代理请求
+ * @param {URL} urlObj URL对象
+ * @param {RequestInit} reqInit 请求初始化对象
+ * @param {string} rawLen 原始长度
  */
-async function handleProxyRequest(request, url) {
-  try {
-    // 方式 1: 查询参数 ?url=https://example.com
-    let targetUrl = url.searchParams.get('url');
+async function proxy(urlObj, reqInit, rawLen) {
+	const res = await fetch(urlObj.href, reqInit);
+	const resHdrOld = res.headers;
+	const resHdrNew = new Headers(resHdrOld);
 
-    // 方式 2: 路径方式 /https://example.com 或 /example.com
-    if (!targetUrl && url.pathname !== '/') {
-      let path = decodeURIComponent(url.pathname.substring(1));
+	// 验证长度
+	if (rawLen) {
+		const newLen = resHdrOld.get('content-length') || '';
+		const badLen = (rawLen !== newLen);
 
-      // 如果路径已经包含协议
-      if (path.startsWith('http://') || path.startsWith('https://')) {
-        targetUrl = path;
-      } else {
-        // 自动添加协议
-        targetUrl = url.protocol + '//' + path;
-      }
+		if (badLen) {
+			return makeRes(res.body, 400, {
+				'--error': `bad len: ${newLen}, except: ${rawLen}`,
+				'access-control-expose-headers': '--error',
+			});
+		}
+	}
+	const status = res.status;
+	resHdrNew.set('access-control-expose-headers', '*');
+	resHdrNew.set('access-control-allow-origin', '*');
+	resHdrNew.set('Cache-Control', 'max-age=1500');
 
-      // 保留查询参数
-      if (url.search) {
-        targetUrl += url.search;
-      }
-    }
+	// 删除不必要的头
+	resHdrNew.delete('content-security-policy');
+	resHdrNew.delete('content-security-policy-report-only');
+	resHdrNew.delete('clear-site-data');
 
-    // 方式 3: 标准 HTTP 代理 - 完整 URL 作为请求目标
-    if (!targetUrl && (request.url.startsWith('http://') || request.url.startsWith('https://'))) {
-      const host = request.headers.get('Host');
-      if (host && !url.hostname.includes(host)) {
-        targetUrl = request.url;
-      }
-    }
-
-    if (!targetUrl) {
-      return new Response(
-        JSON.stringify({
-          error: 'No target URL provided',
-          usage: {
-            web: 'Visit / for Web UI',
-            method1: '?url=https://example.com',
-            method2: '/https://example.com or /example.com',
-            method3: 'Set as HTTP_PROXY in environment'
-          }
-        }, null, 2),
-        {
-          status: 400,
-          headers: {
-            'Content-Type': 'application/json',
-            ...corsHeaders()
-          }
-        }
-      );
-    }
-
-    // 验证目标 URL
-    let target;
-    try {
-      target = new URL(targetUrl);
-    } catch (e) {
-      return new Response(
-        JSON.stringify({
-          error: 'Invalid target URL',
-          provided: targetUrl,
-          message: e.message
-        }, null, 2),
-        {
-          status: 400,
-          headers: {
-            'Content-Type': 'application/json',
-            ...corsHeaders()
-          }
-        }
-      );
-    }
-
-    // 构建代理请求
-    const proxyHeaders = cleanHeaders(request.headers);
-
-    const proxyRequest = new Request(target, {
-      method: request.method,
-      headers: proxyHeaders,
-      body: ['GET', 'HEAD'].includes(request.method) ? null : request.body,
-      redirect: 'manual' // 手动处理重定向
-    });
-
-    // 发起请求
-    const response = await fetch(proxyRequest);
-    let body = response.body;
-
-    // 处理重定向
-    if ([301, 302, 303, 307, 308].includes(response.status)) {
-      const location = response.headers.get('location');
-      if (location) {
-        const modifiedLocation = `/${encodeURIComponent(new URL(location, target).toString())}`;
-        return new Response(response.body, {
-          status: response.status,
-          statusText: response.statusText,
-          headers: {
-            ...Object.fromEntries(response.headers),
-            'Location': modifiedLocation,
-            ...corsHeaders(),
-            ...noCacheHeaders()
-          }
-        });
-      }
-    }
-
-    // 处理 HTML 内容中的相对路径
-    if (response.headers.get('Content-Type')?.includes('text/html')) {
-      body = await handleHtmlContent(response, url.protocol, url.host, target);
-    }
-
-    // 返回响应
-    return new Response(body, {
-      status: response.status,
-      statusText: response.statusText,
-      headers: {
-        ...Object.fromEntries(response.headers),
-        ...corsHeaders(),
-        ...noCacheHeaders()
-      }
-    });
-
-  } catch (error) {
-    return new Response(
-      JSON.stringify({
-        error: 'Proxy request failed',
-        message: error.message,
-        stack: error.stack
-      }, null, 2),
-      {
-        status: 502,
-        headers: {
-          'Content-Type': 'application/json',
-          ...corsHeaders()
-        }
-      }
-    );
-  }
+	return new Response(res.body, {
+		status,
+		headers: resHdrNew
+	});
 }
 
-/**
- * 处理 HTML 内容中的相对路径
- */
-async function handleHtmlContent(response, protocol, host, targetUrl) {
-  const originalText = await response.text();
-  const origin = targetUrl.origin;
-
-  // 替换相对路径：href="/" src="/" action="/"
-  const regex = /((href|src|action)=["'])\/((?!\/))/g;
-  const modifiedText = originalText.replace(regex, `$1${protocol}//${host}/${origin}/$3`);
-
-  return modifiedText;
-}
-
-/**
- * 清理请求头 - 移除不应转发的头
- */
-function cleanHeaders(headers) {
-  const cleaned = new Headers(headers);
-
-  // 移除 Cloudflare 和代理相关头
-  const removeHeaders = [
-    'cf-connecting-ip',
-    'cf-ipcountry',
-    'cf-ray',
-    'cf-visitor',
-    'cf-worker',
-    'x-forwarded-for',
-    'x-forwarded-proto',
-    'x-real-ip'
-  ];
-
-  removeHeaders.forEach(header => cleaned.delete(header));
-
-  return cleaned;
-}
-
-/**
- * CORS 头
- */
-function corsHeaders() {
-  return {
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, PATCH, OPTIONS, HEAD',
-    'Access-Control-Allow-Headers': '*',
-    'Access-Control-Max-Age': '86400'
-  };
-}
-
-/**
- * 禁用缓存头
- */
-function noCacheHeaders() {
-  return {
-    'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
-    'Pragma': 'no-cache',
-    'Expires': '0'
-  };
-}
-
-/**
- * 返回根目录的 HTML - 使用 Tailwind CSS Theme
- */
-function getRootHtml() {
-  return `<!DOCTYPE html>
-<html lang="zh-CN" class="h-full">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Cloudflare Proxy - 全功能代理服务</title>
-  <meta name="description" content="基于 Cloudflare Workers 的全功能 HTTP/HTTPS 代理服务">
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🌐</text></svg>">
-
-  <!-- Tailwind CSS CDN -->
-  <script src="https://cdn.tailwindcss.com"></script>
-  <script>
-    tailwind.config = {
-      theme: {
-        extend: {
-          colors: {
-            zinc: {
-              50: '#fafafa',
-              100: '#f4f4f5',
-              200: '#e4e4e7',
-              300: '#d4d4d8',
-              400: '#a1a1aa',
-              500: '#71717a',
-              600: '#52525b',
-              700: '#3f3f46',
-              800: '#27272a',
-              900: '#18181b',
-            },
-            teal: {
-              400: '#2dd4bf',
-              500: '#14b8a6',
-              600: '#0d9488',
-            }
-          }
-        }
-      }
-    }
-  </script>
-
-  <style>
-    :root {
-      --bg-primary: theme('colors.zinc.50');
-      --bg-secondary: theme('colors.white');
-      --text-primary: theme('colors.zinc.800');
-      --text-secondary: theme('colors.zinc.600');
-      --border-color: theme('colors.zinc.100');
-      --accent-color: theme('colors.teal.500');
-    }
-
-    @media (prefers-color-scheme: dark) {
-      :root {
-        --bg-primary: theme('colors.black');
-        --bg-secondary: theme('colors.zinc.900');
-        --text-primary: theme('colors.zinc.100');
-        --text-secondary: theme('colors.zinc.400');
-        --border-color: rgba(63, 63, 70, 0.4);
-        --accent-color: theme('colors.teal.400');
-      }
-    }
-
-    body {
-      background-color: var(--bg-primary);
-      color: var(--text-primary);
-    }
-  </style>
-</head>
-<body class="flex h-full flex-col">
-  <div class="flex w-full flex-col">
-    <!-- 主内容区域 -->
-    <div class="relative flex w-full flex-col bg-white ring-1 ring-zinc-100 dark:bg-zinc-900 dark:ring-zinc-300/20">
-      <main class="flex-auto">
-        <div class="sm:px-8 mt-16 sm:mt-32">
-          <div class="mx-auto w-full max-w-7xl lg:px-8">
-            <div class="relative px-4 sm:px-8 lg:px-12">
-              <div class="mx-auto max-w-2xl lg:max-w-5xl">
-
-                <!-- 标题区域 -->
-                <div class="max-w-2xl">
-                  <div class="text-6xl mb-6">🌐</div>
-                  <h1 class="text-4xl font-bold tracking-tight text-zinc-800 sm:text-5xl dark:text-zinc-100">
-                    Cloudflare Proxy
-                  </h1>
-                  <p class="mt-6 text-base text-zinc-600 dark:text-zinc-400">
-                    基于 Cloudflare Workers 的全功能 HTTP/HTTPS 代理服务，支持多种访问方式，完全免费且易于使用。
-                  </p>
-                </div>
-
-                <!-- 表单卡片 -->
-                <div class="mt-16 rounded-2xl border border-zinc-100 p-6 dark:border-zinc-700/40">
-                  <form id="urlForm" class="space-y-4">
-                    <div>
-                      <label for="targetUrl" class="block text-sm font-medium text-zinc-900 dark:text-zinc-100 mb-2">
-                        输入目标网址
-                      </label>
-                      <input
-                        type="text"
-                        id="targetUrl"
-                        placeholder="example.com 或 https://example.com"
-                        required
-                        class="w-full rounded-md bg-white px-4 py-2 text-sm text-zinc-900 shadow-sm ring-1 ring-inset ring-zinc-300 placeholder:text-zinc-400 focus:ring-2 focus:ring-teal-500 dark:bg-zinc-800 dark:text-zinc-100 dark:ring-zinc-700 dark:placeholder:text-zinc-500"
-                      >
-                    </div>
-                    <button
-                      type="submit"
-                      class="w-full rounded-md bg-zinc-900 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-zinc-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-900 dark:bg-teal-500 dark:hover:bg-teal-400"
-                    >
-                      开始代理
-                    </button>
-                  </form>
-                </div>
-
-                <!-- 使用方式 -->
-                <div class="mt-16 rounded-2xl border border-zinc-100 p-6 dark:border-zinc-700/40">
-                  <h2 class="text-lg font-semibold text-zinc-900 dark:text-zinc-100 mb-4">
-                    使用方式
-                  </h2>
-                  <div class="space-y-4 text-sm text-zinc-600 dark:text-zinc-400">
-                    <div class="rounded-lg bg-zinc-50 p-4 dark:bg-zinc-800/50">
-                      <div class="font-medium text-zinc-900 dark:text-zinc-100 mb-2">方式 1: Web 界面</div>
-                      <p>在上方输入框输入目标网址即可</p>
-                    </div>
-                    <div class="rounded-lg bg-zinc-50 p-4 dark:bg-zinc-800/50">
-                      <div class="font-medium text-zinc-900 dark:text-zinc-100 mb-2">方式 2: 查询参数</div>
-                      <code class="text-xs text-teal-600 dark:text-teal-400 break-all" id="method2"></code>
-                    </div>
-                    <div class="rounded-lg bg-zinc-50 p-4 dark:bg-zinc-800/50">
-                      <div class="font-medium text-zinc-900 dark:text-zinc-100 mb-2">方式 3: 路径方式</div>
-                      <code class="text-xs text-teal-600 dark:text-teal-400 break-all" id="method3"></code>
-                    </div>
-                    <div class="rounded-lg bg-zinc-50 p-4 dark:bg-zinc-800/50">
-                      <div class="font-medium text-zinc-900 dark:text-zinc-100 mb-2">方式 4: HTTP 代理</div>
-                      <code class="text-xs text-teal-600 dark:text-teal-400 break-all" id="method4"></code>
-                    </div>
-                  </div>
-                </div>
-
-                <!-- 使用场景 -->
-                <div class="mt-16 rounded-2xl border border-zinc-100 p-6 dark:border-zinc-700/40">
-                  <h2 class="text-lg font-semibold text-zinc-900 dark:text-zinc-100 mb-4">
-                    使用场景
-                  </h2>
-                  <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                    <div class="rounded-lg bg-zinc-50 p-4 dark:bg-zinc-800/50">
-                      <div class="font-medium text-zinc-900 dark:text-zinc-100 mb-2">📦 GitHub 文件加速</div>
-                      <p class="text-sm text-zinc-600 dark:text-zinc-400 mb-2">
-                        加速 raw.githubusercontent.com 文件下载
-                      </p>
-                      <code class="text-xs text-teal-600 dark:text-teal-400 break-all" id="scene1"></code>
-                    </div>
-                    <div class="rounded-lg bg-zinc-50 p-4 dark:bg-zinc-800/50">
-                      <div class="font-medium text-zinc-900 dark:text-zinc-100 mb-2">🐳 Docker 镜像加速</div>
-                      <p class="text-sm text-zinc-600 dark:text-zinc-400 mb-2">
-                        配置 Docker 镜像代理源
-                      </p>
-                      <code class="text-xs text-teal-600 dark:text-teal-400 break-all" id="scene2"></code>
-                    </div>
-                    <div class="rounded-lg bg-zinc-50 p-4 dark:bg-zinc-800/50">
-                      <div class="font-medium text-zinc-900 dark:text-zinc-100 mb-2">🤖 OpenAI API 代理</div>
-                      <p class="text-sm text-zinc-600 dark:text-zinc-400 mb-2">
-                        代理 OpenAI API 请求
-                      </p>
-                      <code class="text-xs text-teal-600 dark:text-teal-400 break-all" id="scene3"></code>
-                    </div>
-                    <div class="rounded-lg bg-zinc-50 p-4 dark:bg-zinc-800/50">
-                      <div class="font-medium text-zinc-900 dark:text-zinc-100 mb-2">🌍 通用 CORS 代理</div>
-                      <p class="text-sm text-zinc-600 dark:text-zinc-400 mb-2">
-                        解决前端跨域问题
-                      </p>
-                      <code class="text-xs text-teal-600 dark:text-teal-400 break-all" id="scene4"></code>
-                    </div>
-                  </div>
-                </div>
-
-                <!-- 功能特性 -->
-                <div class="mt-16 grid grid-cols-2 gap-4 sm:grid-cols-4">
-                  <div class="flex items-center text-sm text-zinc-600 dark:text-zinc-400">
-                    <svg class="w-5 h-5 mr-2 text-teal-500" fill="currentColor" viewBox="0 0 20 20">
-                      <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>
-                    </svg>
-                    HTTPS 支持
-                  </div>
-                  <div class="flex items-center text-sm text-zinc-600 dark:text-zinc-400">
-                    <svg class="w-5 h-5 mr-2 text-teal-500" fill="currentColor" viewBox="0 0 20 20">
-                      <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>
-                    </svg>
-                    CORS 跨域
-                  </div>
-                  <div class="flex items-center text-sm text-zinc-600 dark:text-zinc-400">
-                    <svg class="w-5 h-5 mr-2 text-teal-500" fill="currentColor" viewBox="0 0 20 20">
-                      <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>
-                    </svg>
-                    智能重定向
-                  </div>
-                  <div class="flex items-center text-sm text-zinc-600 dark:text-zinc-400">
-                    <svg class="w-5 h-5 mr-2 text-teal-500" fill="currentColor" viewBox="0 0 20 20">
-                      <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>
-                    </svg>
-                    路径修复
-                  </div>
-                </div>
-
-              </div>
-            </div>
-          </div>
-        </div>
-      </main>
-
-      <!-- 页脚 -->
-      <footer class="mt-32">
-        <div class="sm:px-8">
-          <div class="mx-auto w-full max-w-7xl lg:px-8">
-            <div class="border-t border-zinc-100 pt-10 pb-16 dark:border-zinc-700/40">
-              <div class="relative px-4 sm:px-8 lg:px-12">
-                <div class="mx-auto max-w-2xl lg:max-w-5xl">
-                  <div class="flex flex-col items-center justify-between gap-6 sm:flex-row">
-                    <p class="text-sm text-zinc-400 dark:text-zinc-500">
-                      Powered by Cloudflare Workers
-                    </p>
-                    <a
-                      href="https://github.com/Yrobot/cloudflare-proxy"
-                      target="_blank"
-                      class="group flex items-center text-sm font-medium text-zinc-800 transition hover:text-teal-500 dark:text-zinc-200 dark:hover:text-teal-400"
-                    >
-                      <svg class="w-5 h-5 mr-2 fill-zinc-500 transition group-hover:fill-teal-500 dark:fill-zinc-400 dark:group-hover:fill-teal-400" viewBox="0 0 24 24">
-                        <path fill-rule="evenodd" clip-rule="evenodd" d="M12 2C6.475 2 2 6.588 2 12.253c0 4.537 2.862 8.369 6.838 9.727.5.09.687-.218.687-.487 0-.243-.013-1.05-.013-1.91C7 20.059 6.35 18.957 6.15 18.38c-.113-.295-.6-1.205-1.025-1.448-.35-.192-.85-.667-.013-.68.788-.012 1.35.744 1.538 1.051.9 1.551 2.338 1.116 2.912.846.088-.666.35-1.115.638-1.371-2.225-.256-4.55-1.14-4.55-5.062 0-1.115.387-2.038 1.025-2.756-.1-.256-.45-1.307.1-2.717 0 0 .837-.269 2.75 1.051.8-.23 1.65-.346 2.5-.346.85 0 1.7.115 2.5.346 1.912-1.333 2.75-1.05 2.75-1.05.55 1.409.2 2.46.1 2.716.637.718 1.025 1.628 1.025 2.756 0 3.934-2.337 4.806-4.562 5.062.362.32.675.936.675 1.897 0 1.371-.013 2.473-.013 2.82 0 .268.188.589.688.486a10.039 10.039 0 0 0 4.932-3.74A10.447 10.447 0 0 0 22 12.253C22 6.588 17.525 2 12 2Z"/>
-                      </svg>
-                      在 GitHub 上给我们点赞
-                    </a>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </footer>
-    </div>
-  </div>
-
-  <script>
-    // 获取当前域名并填充示例
-    const currentOrigin = window.location.origin;
-
-    // 填充使用方式示例
-    document.getElementById('method2').textContent = currentOrigin + '/?url=https://example.com';
-    document.getElementById('method3').textContent = currentOrigin + '/https://example.com';
-    document.getElementById('method4').textContent = 'export HTTP_PROXY=' + currentOrigin;
-
-    // 填充使用场景示例
-    document.getElementById('scene1').textContent = currentOrigin + '/https://raw.githubusercontent.com/user/repo/main/file.txt';
-    document.getElementById('scene2').textContent = currentOrigin + '/https://registry-1.docker.io';
-    document.getElementById('scene3').textContent = currentOrigin + '/https://api.openai.com/v1/chat/completions';
-    document.getElementById('scene4').textContent = 'fetch("' + currentOrigin + '/https://api.example.com/data")';
-
-    // 表单提交处理
-    document.getElementById('urlForm').addEventListener('submit', function(event) {
-      event.preventDefault();
-
-      let targetUrl = document.getElementById('targetUrl').value.trim();
-
-      // 如果没有协议，自动添加 https://
-      if (!targetUrl.startsWith('http://') && !targetUrl.startsWith('https://')) {
-        targetUrl = 'https://' + targetUrl;
-      }
-
-      // 构建代理 URL
-      const proxyUrl = currentOrigin + '/' + encodeURIComponent(targetUrl);
-
-      // 在新标签页打开
-      window.open(proxyUrl, '_blank');
-    });
-  </script>
-</body>
-</html>`;
+async function ADD(envadd) {
+	var addtext = envadd.replace(/[	 |"'\r\n]+/g, ',').replace(/,+/g, ',');	// 将空格、双引号、单引号和换行符替换为逗号
+	if (addtext.charAt(0) == ',') addtext = addtext.slice(1);
+	if (addtext.charAt(addtext.length - 1) == ',') addtext = addtext.slice(0, addtext.length - 1);
+	const add = addtext.split(',');
+	return add;
 }
